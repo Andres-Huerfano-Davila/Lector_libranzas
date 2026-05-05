@@ -11,7 +11,7 @@ import pytesseract
 
 
 # =========================================================
-# CONFIGURACIÓN
+# CONFIGURACIÓN STREAMLIT
 # =========================================================
 
 st.set_page_config(
@@ -45,9 +45,13 @@ h1, h2, h3 {
 
 st.title("📄 Extractor automático de Libranzas")
 st.write(
-    "Carga PDFs de libranza y el sistema extrae **empleado, cédula, entidad, NIT, "
-    "cuota mensual, cuota quincenal, saldo y obligación/libranza**. "
-    "Incluye lectura OCR para PDFs escaneados."
+    "Carga PDFs de libranza y el sistema intentará extraer automáticamente: "
+    "**empleado, cédula, entidad, NIT, libranza, cuotas, saldo y método de lectura**."
+)
+
+st.info(
+    "Los PDFs escaneados o escritos a mano se leen con OCR. "
+    "Cuando el método sea OCR, valida los datos porque puede haber confusión en números manuscritos."
 )
 
 
@@ -58,7 +62,16 @@ st.write(
 def limpiar_texto(texto: str) -> str:
     if not texto:
         return ""
-    texto = texto.replace("\n", " ")
+
+    reemplazos = {
+        "\n": " ",
+        "\t": " ",
+        "  ": " "
+    }
+
+    for k, v in reemplazos.items():
+        texto = texto.replace(k, v)
+
     texto = re.sub(r"\s+", " ", texto)
     return texto.strip()
 
@@ -70,6 +83,12 @@ def normalizar_numero(valor):
     return int(valor) if valor else ""
 
 
+def normalizar_documento(valor):
+    if not valor:
+        return ""
+    return re.sub(r"[^\d]", "", str(valor))
+
+
 def limpiar_entidad(entidad):
     if not entidad:
         return ""
@@ -77,19 +96,35 @@ def limpiar_entidad(entidad):
     entidad = entidad.strip()
     entidad = re.sub(r"\s+", " ", entidad)
     entidad = entidad.replace(" SAS", " S.A.S")
+    entidad = entidad.replace("SAS", "S.A.S")
     entidad = entidad.replace("S.A.S S.A.S", "S.A.S")
+    entidad = entidad.replace("_", " ")
+    entidad = entidad.replace('"', "")
+    entidad = entidad.strip(" .,-:")
+
     return entidad.upper()
+
+
+def limpiar_nombre(nombre):
+    if not nombre:
+        return ""
+
+    nombre = nombre.strip()
+    nombre = re.sub(r"[_]+", " ", nombre)
+    nombre = re.sub(r"\s+", " ", nombre)
+    nombre = re.sub(r"[^a-zA-ZáéíóúÁÉÍÓÚñÑ\s]", "", nombre)
+    return nombre.upper().strip()
 
 
 def mejorar_imagen_para_ocr(img):
     img = img.convert("L")
-    img = ImageEnhance.Contrast(img).enhance(2.2)
+    img = ImageEnhance.Contrast(img).enhance(2.4)
     img = img.filter(ImageFilter.SHARPEN)
     return img
 
 
 # =========================================================
-# LECTURA PDF / OCR
+# LECTURA PDF DIGITAL / OCR
 # =========================================================
 
 def extraer_texto_pdf_digital(archivo_pdf):
@@ -140,10 +175,13 @@ def texto_parece_basura(texto):
     if not texto:
         return True
 
-    if len(texto) < 120:
+    if len(texto) < 150:
         return True
 
-    caracteres_raros = len(re.findall(r"[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ\s\.\,\:\;\$\-\#\/]", texto))
+    caracteres_raros = len(
+        re.findall(r"[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ\s\.\,\:\;\$\-\#\/]", texto)
+    )
+
     proporcion_raros = caracteres_raros / max(len(texto), 1)
 
     palabras_clave = [
@@ -153,86 +191,59 @@ def texto_parece_basura(texto):
         "cuota",
         "descuento",
         "nit",
-        "salario"
+        "salario",
+        "pagare",
+        "pagaré"
     ]
 
     tiene_palabras_clave = any(p in texto.lower() for p in palabras_clave)
 
-    return proporcion_raros > 0.12 or not tiene_palabras_clave
+    return proporcion_raros > 0.14 or not tiene_palabras_clave
 
 
 def extraer_texto_pdf(archivo_pdf):
     texto_digital = extraer_texto_pdf_digital(archivo_pdf)
-
-    metodo = "PDF digital"
 
     if texto_parece_basura(texto_digital):
         texto_ocr = extraer_texto_pdf_ocr(archivo_pdf)
 
         if texto_ocr and not texto_ocr.startswith("ERROR_OCR"):
             return texto_ocr, "OCR"
-        else:
-            return texto_digital + " " + texto_ocr, "PDF digital / OCR con alerta"
 
-    return texto_digital, metodo
+        return texto_digital + " " + texto_ocr, "PDF digital / OCR con alerta"
+
+    return texto_digital, "PDF digital"
 
 
 # =========================================================
-# EXTRACCIONES
+# EXTRACCIONES ESPECÍFICAS
 # =========================================================
 
-def extraer_cedula(texto):
+def extraer_nits(texto):
+    nits = []
+
     patrones = [
-        r"identificado\(a\)\s+con\s+c[eé]dula de ciudadan[ií]a\s+No\.?\s*([0-9\.\-\s]{6,20})",
-        r"identificado\s+con\s+C\.?C\.?\s*([0-9\.\-\s]{6,20})",
-        r"C\.?C\.?\s*No\.?\s*([0-9\.\-\s]{6,20})",
-        r"C\.?C\.?\s*([0-9\.\-\s]{6,20})",
-        r"c[eé]dula de ciudadan[ií]a\s+No\.?\s*([0-9\.\-\s]{6,20})",
-        r"No\.?\s*([0-9\.\-\s]{7,20})\s+expedida",
-        r"Nombre completo.*?C\.?C\.?\s*No\.?\s*([0-9\.\-\s]{6,20})"
+        r"NIT\s*[:\.]?\s*([0-9\.\-]+)",
+        r"con\s+NIT\s*[:\.]?\s*([0-9\.\-]+)",
+        r"identificada\s+con\s+NIT\.?\s*([0-9\.\-]+)",
+        r"identificado\s+con\s+NIT\.?\s*([0-9\.\-]+)"
     ]
-
-    posibles = []
 
     for patron in patrones:
         for match in re.finditer(patron, texto, re.IGNORECASE):
-            cedula = normalizar_numero(match.group(1))
-            if cedula and 6 <= len(str(cedula)) <= 12:
-                posibles.append(str(cedula))
+            nit = normalizar_documento(match.group(1))
+            if nit:
+                nits.append(nit)
 
-    if posibles:
-        return posibles[0]
-
-    return ""
-
-
-def extraer_empleado(texto):
-    patrones = [
-        r"el señor\s+(.+?)\s+identificado con C\.?C\.?",
-        r"el\(la\) señor\(a\s*\)\s+(.+?)\s+con c[eé]dula",
-        r"señor\(a\)\s+(.+?)\s*,?\s*identificado",
-        r"Yo,\s*(.+?)\s+identificado\(a\)",
-        r"Nombre completo\s*[:\-]?\s*(.+?)\s+C\.?C\.?",
-        r"notificando.*?pago del señor\s+(.+?)\s+identificado"
-    ]
-
-    for patron in patrones:
-        match = re.search(patron, texto, re.IGNORECASE)
-        if match:
-            nombre = match.group(1).strip()
-            nombre = re.sub(r"[_]+", " ", nombre)
-            nombre = re.sub(r"\s+", " ", nombre)
-            nombre = re.sub(r"[^a-zA-ZáéíóúÁÉÍÓÚñÑ\s]", "", nombre)
-            return nombre.upper().strip()
-
-    return ""
+    return list(set(nits))
 
 
 def extraer_nit_entidad(texto):
     patrones = [
         r"NIT\s*[:\.]?\s*([0-9\.\-]+)",
         r"NIT\.?\s*([0-9\.\-]+)",
-        r"identificado con NIT\s*([0-9\.\-]+)"
+        r"identificado con NIT\s*([0-9\.\-]+)",
+        r"identificada con NIT\.?\s*([0-9\.\-]+)"
     ]
 
     for patron in patrones:
@@ -243,12 +254,76 @@ def extraer_nit_entidad(texto):
     return ""
 
 
+def extraer_cedula(texto):
+    nits_detectados = extraer_nits(texto)
+
+    patrones_prioritarios = [
+        r"identificado(?:\(a\))?\s+con\s+c[eé]dula(?:\s+de\s+ciudadan[ií]a)?\s*(?:No\.?)?\s*([0-9\.\-\s]{6,20})",
+        r"identificada(?:\(a\))?\s+con\s+c[eé]dula(?:\s+de\s+ciudadan[ií]a)?\s*(?:No\.?)?\s*([0-9\.\-\s]{6,20})",
+        r"c[eé]dula(?:\s+de\s+ciudadan[ií]a)?\s*(?:No\.?)?\s*([0-9\.\-\s]{6,20})",
+        r"C\.?C\.?\s*(?:No\.?)?\s*([0-9\.\-\s]{6,20})",
+        r"N[uú]mero\s*([0-9\.\-\s]{6,20})",
+        r"CC\s*o\s*NIT\s*[:\.]?\s*([0-9\.\-\s]{6,20})"
+    ]
+
+    candidatos = []
+
+    for patron in patrones_prioritarios:
+        for match in re.finditer(patron, texto, re.IGNORECASE):
+            cedula = normalizar_documento(match.group(1))
+
+            if not cedula:
+                continue
+
+            if cedula in nits_detectados:
+                continue
+
+            if 6 <= len(cedula) <= 10:
+                candidatos.append(cedula)
+
+    if candidatos:
+        return candidatos[0]
+
+    return ""
+
+
+def extraer_empleado(texto):
+    patrones = [
+        r"su empleado\s+(.+?)\s+identificado con c[eé]dula",
+        r"el señor\s+(.+?)\s+identificado con C\.?C\.?",
+        r"el\(la\) señor\(a\s*\)\s+(.+?)\s+con c[eé]dula",
+        r"señor\(a\)\s+(.+?)\s*,?\s*identificado",
+        r"Yo,\s*(.+?)\s+identificado\(a\)",
+        r"Nombre completo\s*[:\-]?\s*(.+?)\s+C\.?C\.?",
+        r"notificando.*?pago del señor\s+(.+?)\s+identificado",
+        r"Nombre\s*[:\-]?\s*(.+?)\s+identificado"
+    ]
+
+    for patron in patrones:
+        match = re.search(patron, texto, re.IGNORECASE)
+        if match:
+            nombre = limpiar_nombre(match.group(1))
+            if nombre:
+                return nombre
+
+    return ""
+
+
 def extraer_entidad(texto, nombre_archivo=""):
     texto_upper = texto.upper()
     archivo_upper = nombre_archivo.upper()
 
+    if "COOMUNIDAD" in texto_upper or "COOMUNIDAD" in archivo_upper:
+        return "COOPERATIVA DE CREDITO Y SERVICIO COOMUNIDAD"
+
     if "CREDIRUZ" in texto_upper or "CREDIRUZ" in archivo_upper:
         return "CREDIRUZ S.A.S"
+
+    if "VISION FUTURO" in texto_upper or "VISIÓN FUTURO" in texto_upper:
+        return "VISION FUTURO ORGANISMO COOPERATIVO"
+
+    if "COMPAÑIA DE INVERSIONES Y LIBRANZAS" in texto_upper or "COMPAÑÍA DE INVERSIONES Y LIBRANZAS" in texto_upper:
+        return "COMPAÑIA DE INVERSIONES Y LIBRANZAS S.A.S"
 
     patrones = [
         r"^(.+?)\s+NIT\s*[0-9\.\-]+",
@@ -267,7 +342,10 @@ def extraer_entidad(texto, nombre_archivo=""):
         "BUCARAMANGA",
         "MEDELLÍN",
         "MEDELLIN",
-        "CARTAGENA"
+        "CARTAGENA",
+        "BOGOTA",
+        "BOGOTÁ",
+        "COLOMBIA"
     ]
 
     for patron in patrones:
@@ -276,7 +354,6 @@ def extraer_entidad(texto, nombre_archivo=""):
             entidad = limpiar_entidad(match.group(1))
 
             if entidad and not any(x in entidad for x in descartes):
-                entidad = entidad.replace("_", " ").strip()
                 return entidad
 
     return ""
@@ -284,11 +361,13 @@ def extraer_entidad(texto, nombre_archivo=""):
 
 def extraer_obligacion(texto):
     patrones = [
-        r"libranza No\.?\s*([0-9\.\-]+)",
+        r"libranza\s+N\.?\s*([A-Za-z0-9\.\-]+)",
+        r"libranza\s+No\.?\s*([A-Za-z0-9\.\-]+)",
         r"Libranza\s+No\.?\s*([A-Za-z0-9\.\-]+)",
-        r"obligaci[oó]n N\s*([0-9\.\-]+)",
-        r"Pagare N\s*([0-9\.\-]+)",
-        r"Pagar[eé] N[°º]?\s*([0-9\.\-]+)"
+        r"obligaci[oó]n\s+N\s*([0-9\.\-]+)",
+        r"Pagare\s+N\s*([0-9\.\-]+)",
+        r"Pagar[eé]\s+N[°º]?\s*([0-9\.\-]+)",
+        r"PAGAR[EÉ]\s+A\s+LA\s+ORDEN/LIBRANZA\s*([0-9\.\-]+)"
     ]
 
     for patron in patrones:
@@ -303,7 +382,8 @@ def extraer_numero_cuotas(texto):
     patrones = [
         r"(\d+)\s+cuotas mensuales",
         r"descontadas.*?(\d+)\s+cuotas mensuales",
-        r"total de\s+(\d+)\s+cuotas"
+        r"total de\s+(\d+)\s+cuotas",
+        r"se debe descontar el total de\s+(\d+)\s+cuotas"
     ]
 
     for patron in patrones:
@@ -316,9 +396,11 @@ def extraer_numero_cuotas(texto):
 
 def extraer_cuota_mensual(texto):
     patrones = [
+        r"cuotas mensuales por valor cada una de\s*\$?\s*([0-9\.\,]+)",
         r"cuotas mensuales de\s*\$?\s*([0-9\.\,]+)",
         r"cada una de ellas por el valor de\s*\$?\s*([0-9\.\,]+)",
         r"por valor de\s*\$?\s*([0-9\.\,]+)",
+        r"por valor cada una de\s*\$?\s*([0-9\.\,]+)",
         r"cuota mensual.*?\$?\s*([0-9\.\,]+)",
         r"valor total de la cuota mensual.*?\$?\s*([0-9\.\,]+)",
         r"cuotas de\s*\$?\s*([0-9\.\,]+)\s*mensual",
@@ -330,7 +412,7 @@ def extraer_cuota_mensual(texto):
     for patron in patrones:
         for match in re.finditer(patron, texto, re.IGNORECASE):
             valor = normalizar_numero(match.group(1))
-            if valor and valor >= 1000:
+            if valor and 1000 <= valor <= 10000000:
                 candidatos.append(valor)
 
     if candidatos:
@@ -359,6 +441,8 @@ def extraer_saldo(texto):
         r"saldo pendiente de\s*\$?\s*([0-9\.\,]+)",
         r"a la fecha suma la cifra de\s*\$?\s*([0-9\.\,]+)",
         r"hasta completar la suma de\s*\$?\s*([0-9\.\,]+)",
+        r"valor total de\s*\$?\s*([0-9\.\,]+)",
+        r"para un valor total de\s*\$?\s*([0-9\.\,]+)",
         r"saldo.*?\$?\s*([0-9\.\,]+)"
     ]
 
@@ -376,10 +460,20 @@ def extraer_saldo(texto):
     return ""
 
 
+# =========================================================
+# VALIDACIÓN Y PROCESAMIENTO
+# =========================================================
+
 def validar_registro(registro):
     faltantes = []
 
-    for campo in ["Cédula", "Entidad", "Cuota mensual"]:
+    campos_obligatorios = [
+        "Cédula",
+        "Entidad",
+        "Cuota mensual"
+    ]
+
+    for campo in campos_obligatorios:
         if registro.get(campo, "") in ["", None]:
             faltantes.append(campo)
 
@@ -407,7 +501,7 @@ def procesar_pdf(archivo):
         "Cuota mensual": extraer_cuota_mensual(texto),
         "Cuota quincenal": extraer_cuota_quincenal(texto),
         "Saldo": extraer_saldo(texto),
-        "Texto leído": texto[:2500]
+        "Texto leído": texto[:4000]
     }
 
     registro["Estado"] = validar_registro(registro)
@@ -427,11 +521,6 @@ archivos = st.file_uploader(
     accept_multiple_files=True
 )
 
-st.info(
-    "Nota: los PDFs escaneados o escritos a mano requieren OCR. "
-    "El sistema los procesa, pero deben validarse porque el OCR puede confundir números o letras."
-)
-
 if archivos:
     resultados = []
     errores = []
@@ -443,6 +532,7 @@ if archivos:
         try:
             status.write(f"Procesando: {archivo.name}")
             resultados.append(procesar_pdf(archivo))
+
         except Exception as e:
             errores.append({
                 "Archivo": archivo.name,
@@ -509,7 +599,11 @@ if archivos:
     output = io.BytesIO()
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df[columnas_salida].to_excel(writer, index=False, sheet_name="Consolidado")
+        df[columnas_salida].to_excel(
+            writer,
+            index=False,
+            sheet_name="Consolidado"
+        )
 
         df[df["Estado"].astype(str).str.startswith("OK")][columnas_salida].to_excel(
             writer,
@@ -524,7 +618,11 @@ if archivos:
         )
 
         if errores:
-            pd.DataFrame(errores).to_excel(writer, index=False, sheet_name="Errores")
+            pd.DataFrame(errores).to_excel(
+                writer,
+                index=False,
+                sheet_name="Errores"
+            )
 
     st.download_button(
         label="📥 Descargar Excel consolidado",
@@ -538,4 +636,4 @@ else:
 
 
 st.markdown("---")
-st.caption("Creado por Andrés Huérfano Dávila – Nómina JMC")
+st.caption("Creado por Andrés Huérfano Dávila")
